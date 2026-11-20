@@ -1,0 +1,32 @@
+# Android / Gradle
+build/
+.gradle/
+.kotlin/
+local.properties
+captures/
+*.apk
+*.aab
+
+# Signing material - never commit a keystore or its properties
+keystore.properties
+*.jks
+*.keystore
+
+# Python (the bridge runs on the server)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets and local configuration
+.bridge-token
+config.json
+config-mac.json
+*.local
+
+# Logs and runtime state
+*.log
+logs/
+
+# macOS
+.DS_Store
