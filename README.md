@@ -70,10 +70,10 @@ The phone and the server need to be on the same network. Nothing else does.
 
 ## Just want the APK?
 
-The [v1.0.0 release](https://github.com/krumjahn/orb-hermes/releases/tag/v1.0.0)
+The [v1.0.1 release](https://github.com/krumjahn/orb-hermes/releases/tag/v1.0.1)
 has a signed APK. Install it straight from your phone's browser:
 
-1. Download `orb-hermes-v1.0.0.apk` from the release page.
+1. Download `orb-hermes-v1.0.1.apk` from the release page.
 2. Tap it and let your browser install unknown apps for this one download.
 3. Open **Orb Hermes**.
 

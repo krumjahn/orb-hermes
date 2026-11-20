@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -15,6 +16,7 @@ import android.widget.EditText
 import android.widget.GridLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -353,6 +355,20 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             setText(settings.token)
             hint = "shared secret (blank = none)"
             setSingleLine()
+            // a shared secret does not belong on screen in clear text
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val showToken = CheckBox(this).apply {
+            text = "Show token"
+            setOnClickListener {
+                val visible = tokenInput.inputType and InputType.TYPE_MASK_VARIATION ==
+                    InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                tokenInput.inputType = if (visible) {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                } else {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                }
+            }
         }
         val voiceInput = EditText(this).apply {
             setText(settings.voiceId)
@@ -390,6 +406,7 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             addView(urlInput)
             addView(label("Access token"))
             addView(tokenInput)
+            addView(showToken)
             addView(label("Wake word"))
             addView(wakeInput)
             addView(label("MiniMax voice id"))
@@ -401,9 +418,12 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             addView(licencesButton)
         }
 
+        // a phone lying in landscape is only 720 px tall, so the settings scroll
+        val scroll = ScrollView(this).apply { addView(container) }
+
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Connection")
-            .setView(container)
+            .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 settings.baseUrl = urlInput.text.toString()
                 settings.token = tokenInput.text.toString()
