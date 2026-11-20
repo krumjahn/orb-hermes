@@ -378,6 +378,11 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             text = "Show text hints (off = orb only)"
         }
 
+        val licencesButton = Button(this).apply {
+            text = "Open-source licences"
+            setOnClickListener { Licences.show(this@MainActivity) }
+        }
+
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padding, dp(8), padding, 0)
@@ -393,6 +398,7 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             addView(scaleInput)
             addView(cloudBox)
             addView(hintsBox)
+            addView(licencesButton)
         }
 
         androidx.appcompat.app.AlertDialog.Builder(this)

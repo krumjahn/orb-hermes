@@ -22,6 +22,7 @@ internet connection required once it is installed.
 
 - [How it fits together](#how-it-fits-together)
 - [What you need](#what-you-need)
+- [Just want the APK?](#just-want-the-apk)
 - [1. Install the bridge](#1-install-the-bridge)
 - [2. Point the phone at it](#2-point-the-phone-at-it)
 - [3. Use it](#3-use-it)
@@ -64,6 +65,35 @@ means one shared token guards every request.
 | A Mac *(optional)* | The relay | Only if the server refuses inbound connections |
 
 The phone and the server need to be on the same network. Nothing else does.
+
+---
+
+## Just want the APK?
+
+The [v1.0.0 release](https://github.com/krumjahn/orb-hermes/releases/tag/v1.0.0)
+has a signed APK. Install it straight from your phone's browser:
+
+1. Download `orb-hermes-v1.0.0.apk` from the release page.
+2. Tap it and let your browser install unknown apps for this one download.
+3. Open **Orb Hermes**.
+
+No account, no sign-up, and **no server address baked into the APK**. The app
+starts blank and waits for you to tell it where your bridge is:
+
+- Tap the orb to reveal the options strip, then the **gear**.
+- Set **Hermes server** to your bridge, for example `http://192.168.1.20:8787`.
+- Paste the token the bridge printed when it started.
+
+The token is the only secret, and it never leaves your phone. Everything else -
+the server, the agent, your notes - stays on your own hardware.
+
+You still need your own bridge and your own agent (see
+[What you need](#what-you-need)). The APK is the phone half; the bridge is the
+other half, and you run that yourself.
+
+> The release APK is signed with a publisher key, so a later version installs
+> over this one without an uninstall. If you ever put on a build signed with a
+> different key, Android refuses to replace it and you have to uninstall first.
 
 ---
 
@@ -183,9 +213,13 @@ gradle assembleRelease
 # -> app/build/outputs/apk/release/app-release.apk
 ```
 
-The release build is debug-signed, so it installs without any keystore setup.
-For your own signing, add a `keystore.properties` next to `app/` — see
-`app/build.gradle.kts`.
+Without a `keystore.properties` the release build falls back to the Android
+debug key, which is fine for an APK you only put on your own phone. For an APK
+you hand to other people, sign it with your own key: copy
+`keystore.properties.example` to `keystore.properties` in the project root and
+fill it in. The key you sign with is the key everybody has to keep, because
+Android refuses to install a new APK over an old one signed with a different
+key.
 
 > **The application id is `com.keith.orbhermes`.** It is left as it is on
 > purpose: the app is already installed under that id and renaming it would
