@@ -1,0 +1,9 @@
+The liquid-glass orb in this app is a re-implementation of the shader in
+https://github.com/LerSent001/orb (MIT Licence, Copyright (c) its authors).
+
+The preset names and the palette come from that project. The renderer here is
+a native OpenGL ES 3.0 rewrite, because the reference project is WebGPU/WGSL
+and the phone this app was built for has no WebGPU.
+
+The rest of this repository - the app, the bridge, the relay and the scripts -
+is MIT, see LICENSE.

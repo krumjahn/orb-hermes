@@ -351,7 +351,8 @@ agent.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE), and [NOTICE](NOTICE) for the attribution of the
+orb's look.
 
 The liquid-glass orb's look comes from
 [LerSent001/orb](https://github.com/LerSent001/orb) (also MIT). The preset
