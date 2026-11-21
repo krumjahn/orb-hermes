@@ -50,6 +50,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_SHOW_HINTS, true)
         set(value) = prefs.edit().putBoolean(KEY_SHOW_HINTS, value).apply()
 
+    /** True when saying "stop" cuts the orb off while it is talking. */
+    var interruptByVoice: Boolean
+        get() = prefs.getBoolean(KEY_INTERRUPT, true)
+        set(value) = prefs.edit().putBoolean(KEY_INTERRUPT, value).apply()
+
     /** True once the user has picked an orb in the first-run picker. */
     var onboardingDone: Boolean
         get() = prefs.getBoolean(KEY_ONBOARDED, false)
@@ -65,6 +70,7 @@ class Settings(context: Context) {
         private const val KEY_VOICE_ID = "voice_id"
         private const val KEY_WAKE = "wake_phrase"
         private const val KEY_SHOW_HINTS = "show_hints"
+        private const val KEY_INTERRUPT = "interrupt_by_voice"
         private const val KEY_ONBOARDED = "onboarded"
     }
 }

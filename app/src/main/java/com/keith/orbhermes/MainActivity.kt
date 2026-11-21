@@ -201,7 +201,14 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
     }
 
     private fun wireControls() {
-        orbView.onTap = { toggleOptions() }
+        orbView.onTap = {
+            // a tap on a talking orb cuts the reply off
+            if (core.isSpeaking) {
+                core.stopSpeakingNow()
+            } else {
+                toggleOptions()
+            }
+        }
         findViewById<ImageButton>(R.id.closeButton).setOnClickListener {
             optionsPanel.visibility = View.GONE
             optionsVisible = false
@@ -393,6 +400,10 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             isChecked = settings.showHints
             text = "Show text hints (off = orb only)"
         }
+        val interruptBox = CheckBox(this).apply {
+            isChecked = settings.interruptByVoice
+            text = "Let me say “stop” to cut the orb off"
+        }
 
         val licencesButton = Button(this).apply {
             text = "Open-source licences"
@@ -414,6 +425,7 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
             addView(label("Orb render scale"))
             addView(scaleInput)
             addView(cloudBox)
+            addView(interruptBox)
             addView(hintsBox)
             addView(licencesButton)
         }
@@ -432,6 +444,7 @@ class MainActivity : AppCompatActivity(), OrbCore.Listener {
                 settings.renderScale = scaleInput.text.toString().toFloatOrNull() ?: 0.42f
                 settings.preferCloudVoice = cloudBox.isChecked
                 settings.showHints = hintsBox.isChecked
+                settings.interruptByVoice = interruptBox.isChecked
                 orbView.renderScale = settings.renderScale
                 core.onSettingsChanged()
             }

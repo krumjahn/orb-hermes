@@ -70,10 +70,10 @@ The phone and the server need to be on the same network. Nothing else does.
 
 ## Just want the APK?
 
-The [v1.0.1 release](https://github.com/krumjahn/orb-hermes/releases/tag/v1.0.1)
+The [latest release](https://github.com/krumjahn/orb-hermes/releases/latest)
 has a signed APK. Install it straight from your phone's browser:
 
-1. Download `orb-hermes-v1.0.1.apk` from the release page.
+1. Download the APK (`orb-hermes-<version>.apk`) from the release page.
 2. Tap it and let your browser install unknown apps for this one download.
 3. Open **Orb Hermes**.
 
@@ -182,14 +182,29 @@ The phone lies on your desk in landscape. That is the whole interface.
 **Standing by** — the orb dims over ~45 seconds of silence and brightens again
 as soon as you interact with it. Say **"Orbit"** to wake it.
 
-**Awake** — the orb lights up and listens. It captures audio continuously and
-stops sending while it talks back, so it cannot hear itself.
+**Awake** — the orb lights up and listens. It captures audio continuously, and
+an echo canceller takes the orb's own voice out of the microphone, so it
+cannot hear itself.
 
 **Speaking** — the orb grows and shrinks with the audio of the reply, so you
-can see it talking from across the desk.
+can see it talking from across the desk. The answer is made in pieces, so the
+first words are playing while the rest is still being made.
 
 **After the reply** — it goes back to listening, so you can keep the
 conversation going. After 25 seconds of silence it stands down and dims again.
+
+### Talking to it
+
+Three things that need no wake word:
+
+| Say | What happens |
+|---|---|
+| anything, right after an answer | The orb says **"Go on…"** for six seconds. Speak in that window and the question goes straight to the agent — no **"Orbit"** needed. |
+| **"stop"**, while it is talking | The reply is cut off. The parser is strict: the whole phrase has to be a stop command, so an answer that merely contains the word "stop" is not a command. |
+| a tap on the orb, while it is talking | The same thing, and it always works — the phone cannot hear the orb's own voice perfectly, so the tap is the reliable way. |
+
+The voice interrupt can be switched off in the settings, next to the
+**"Show text hints"** tick box. The tap always works.
 
 Transcripts appear at the bottom while you talk and fade away on their own, so
 the desk settles back to a bare orb.

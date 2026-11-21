@@ -91,6 +91,7 @@ cp "$ROOT/app/src/main/java/com/keith/orbhermes/BandSmoother.kt" "$WORK/"
 cp "$ROOT/app/src/main/java/com/keith/orbhermes/AnswerCleaner.kt" "$WORK/"
 cp "$ROOT/app/src/main/java/com/keith/orbhermes/UploadGuard.kt" "$WORK/"
 cp "$ROOT/app/src/main/java/com/keith/orbhermes/Utterance.kt" "$WORK/"
+cp "$ROOT/app/src/main/java/com/keith/orbhermes/Command.kt" "$WORK/"
 cp "$ROOT/tools/wake-word-test/TestMain.kt" "$WORK/"
 cp "$ROOT/tools/wake-word-test/CodecTest.kt" "$WORK/"
 cp "$ROOT/tools/wake-word-test/ClipTest.kt" "$WORK/"
@@ -98,14 +99,15 @@ cp "$ROOT/tools/wake-word-test/BandTest.kt" "$WORK/"
 cp "$ROOT/tools/wake-word-test/AnswerTest.kt" "$WORK/"
 cp "$ROOT/tools/wake-word-test/GuardTest.kt" "$WORK/"
 cp "$ROOT/tools/wake-word-test/UtteranceTest.kt" "$WORK/"
+cp "$ROOT/tools/wake-word-test/CommandTest.kt" "$WORK/"
 
 java -cp "$CP" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
   -cp "$STDLIB" "$WORK/WakeWord.kt" "$WORK/WavCodec.kt" "$WORK/ClipWindow.kt" \
   "$WORK/BandSmoother.kt" "$WORK/AnswerCleaner.kt" "$WORK/UploadGuard.kt" \
-  "$WORK/Utterance.kt" \
+  "$WORK/Utterance.kt" "$WORK/Command.kt" \
   "$WORK/TestMain.kt" "$WORK/CodecTest.kt" "$WORK/ClipTest.kt" \
   "$WORK/BandTest.kt" "$WORK/AnswerTest.kt" "$WORK/GuardTest.kt" \
-  "$WORK/UtteranceTest.kt" \
+  "$WORK/UtteranceTest.kt" "$WORK/CommandTest.kt" \
   -d "$WORK/out" 2>&1 |
   grep -viE '^warning:|^info:' || true
 
@@ -116,3 +118,4 @@ java -cp "$WORK/out:$STDLIB" BandTestKt
 java -cp "$WORK/out:$STDLIB" AnswerTestKt
 java -cp "$WORK/out:$STDLIB" GuardTestKt
 java -cp "$WORK/out:$STDLIB" UtteranceTestKt
+java -cp "$WORK/out:$STDLIB" CommandTestKt

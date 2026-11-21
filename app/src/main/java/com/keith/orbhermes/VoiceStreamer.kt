@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
 import kotlin.math.min
@@ -22,8 +23,9 @@ import kotlin.math.min
  * small frames so the onset can be located precisely, and the clip is built
  * as [MARGIN] of lead-in audio plus [WINDOW] of speech from that onset.
  *
- * While the orb is speaking the stream can be muted, which stops the TTS
- * output from being transcribed back as a command.
+ * While the orb is speaking the stream keeps running. An echo canceller takes
+ * the orb's own voice out of the microphone, so a person can still cut the
+ * reply short by saying "stop".
  */
 class VoiceStreamer(
     private val onChunk: (wav: ByteArray, level: Float) -> Unit,
@@ -33,20 +35,23 @@ class VoiceStreamer(
 ) {
 
     @Volatile private var running = false
-    @Volatile private var muted = false
     /** Set when the detector has to start over, picked up by the capture loop. */
     @Volatile private var resetRequested = false
     private var recorder: AudioRecord? = null
     private var thread: Thread? = null
+    /** Takes the phone's own speaker out of the microphone. */
+    private var echoCanceller: AcousticEchoCanceler? = null
 
     val isRunning: Boolean get() = running
 
-    /** Drop chunks while the orb is talking so it does not hear itself. */
-    fun setMuted(value: Boolean) {
-        muted = value
-        // the orb's own voice would otherwise drive the detector and leave the
-        // next utterance starting in the middle of a word
-        if (value) resetRequested = true
+    /**
+     * Throws away what the detector has buffered.
+     *
+     * The orb's own voice is in there after it has talked, and it would
+     * otherwise be the beginning of the next utterance.
+     */
+    fun reset() {
+        resetRequested = true
     }
 
     @SuppressLint("MissingPermission")
@@ -72,9 +77,34 @@ class VoiceStreamer(
         }
         recorder = rec
         running = true
+        attachEchoCanceller(rec)
         rec.startRecording()
         thread = Thread { pump(rec) }.also { it.start() }
         return true
+    }
+
+    /**
+     * Takes the phone's own speaker out of the microphone.
+     *
+     * The orb talks through the phone, so the microphone hears the answer.
+     * The echo canceller is the only thing that can tell the orb's voice from
+     * the person's, and it is what lets a person cut the reply short by saying
+     * "stop".
+     *
+     * Not every device has one. Without it the orb still works - it just
+     * cannot be interrupted by voice.
+     */
+    private fun attachEchoCanceller(rec: AudioRecord) {
+        try {
+            if (!AcousticEchoCanceler.isAvailable()) return
+            val canceler = AcousticEchoCanceler.create(rec.audioSessionId)
+            if (canceler != null) {
+                canceler.enabled = true
+                echoCanceller = canceler
+            }
+        } catch (e: Exception) {
+            echoCanceller = null
+        }
     }
 
     fun stop() {
@@ -87,6 +117,12 @@ class VoiceStreamer(
         recorder?.release()
         recorder = null
         thread = null
+        try {
+            echoCanceller?.release()
+        } catch (e: Exception) {
+            // ignore
+        }
+        echoCanceller = null
     }
 
     private fun pump(rec: AudioRecord) {
@@ -159,17 +195,15 @@ class VoiceStreamer(
             if (levelTicks % 200 == 0) {
                 android.util.Log.i(
                     "OrbHermes",
-                    "mic level=%.4f thr=%.4f floor=%.4f clips=%d muted=%s".format(
-                        window.level, window.threshold, window.noiseFloor, clips, muted,
+                    "mic level=%.4f thr=%.4f floor=%.4f clips=%d".format(
+                        window.level, window.threshold, window.noiseFloor, clips,
                     ),
                 )
             }
 
             if (clip != null) {
                 clips++
-                if (!muted) {
-                    onChunk(wavFromPcm(clip), window.level)
-                }
+                onChunk(wavFromPcm(clip), window.level)
             }
         }
         try {

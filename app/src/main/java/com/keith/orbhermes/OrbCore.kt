@@ -84,6 +84,9 @@ class OrbCore private constructor(private val appContext: Context) {
     var onboardingDone: Boolean = false
         private set
 
+    /** True while the orb is talking - the screen uses it to stop the reply. */
+    val isSpeaking: Boolean get() = phase == OrbPhase.SPEAKING
+
     // ---- internals --------------------------------------------------------
 
     private val settings = Settings(appContext)
@@ -91,6 +94,8 @@ class OrbCore private constructor(private val appContext: Context) {
     /** Shows what the orb is doing while it waits for an answer. */
     private val thinkingStatus = Handler(Looper.getMainLooper())
     private val replyExecutor = Executors.newSingleThreadExecutor()
+    /** The pieces of one answer are made side by side, so the first starts sooner. */
+    private val speakExecutor = Executors.newFixedThreadPool(3)
     private val healthExecutor = Executors.newSingleThreadExecutor()
     private val pendingUploads = AtomicInteger(0)
 
@@ -159,6 +164,27 @@ class OrbCore private constructor(private val appContext: Context) {
     private var lastHealthCheckAt = 0L
     private var outageAnnounced = false
 
+    /**
+     * When the window for the next question closes.
+     *
+     * The orb already listened after a reply without needing the wake word -
+     * what was missing was the sign that said so, so the person knows they
+     * can simply carry on talking.
+     */
+    @Volatile private var followUpUntil = 0L
+    /** The text the orb is speaking right now, so its own voice is not heard as a command. */
+    @Volatile private var speakingText = ""
+    /** The pieces of the answer, filled in as they are made. */
+    private val speakPieces = ArrayList<ByteArray?>()
+    /** How many pieces have been made, whether they worked or not. */
+    private val speakFilled = AtomicInteger(0)
+    /** The piece that is played next. */
+    private var speakNext = 0
+    /** Bumped when the reply is cut off, so the pieces still coming are dropped. */
+    private val speakGeneration = AtomicInteger(0)
+    /** Counts the reply files, so one piece cannot overwrite the one playing. */
+    private var replyFile = 0
+
     private val utterance = StringBuilder()
     /**
      * The audio of the utterance.
@@ -220,12 +246,12 @@ class OrbCore private constructor(private val appContext: Context) {
         enterStandby()
     }
 
-    /** The talk button: start an utterance, or close the current one. */
+    /** The talk button: stop the reply, close the utterance, or start one. */
     fun talk() {
-        if (phase == OrbPhase.AWAKE) {
-            finishUtterance()
-        } else {
-            wakeUp("")
+        when (phase) {
+            OrbPhase.SPEAKING -> stopSpeakingNow()
+            OrbPhase.AWAKE -> finishUtterance()
+            else -> wakeUp("")
         }
         touch()
     }
@@ -260,6 +286,9 @@ class OrbCore private constructor(private val appContext: Context) {
     }
 
     private fun setStatus(text: String) {
+        // the ticker runs twenty times a second, and the status only has to be
+        // written when it really changes
+        if (text == statusText) return
         statusText = text
         listener?.onStatus(text)
     }
@@ -439,13 +468,21 @@ class OrbCore private constructor(private val appContext: Context) {
             work = {
                 try {
                     val client = client()
-                    if (phase == OrbPhase.STANDBY) {
+                    if (phase == OrbPhase.SPEAKING) {
+                        // the orb is talking: the only thing worth hearing is a
+                        // command to stop it
+                        checkForStop(wav)
+                    } else if (phase == OrbPhase.STANDBY) {
                         val result = client.wake(wav)
                         val (text, woke) = result.value ?: ("" to false)
                         if (!result.ok) {
                             android.util.Log.w("OrbHermes", "wake check failed: ${result.error}")
                         }
-                        if (woke || WakeWord.matches(text, settings.wakePhrase)) {
+                        // after an answer the next question may come without the
+                        // wake word, as long as the window is open
+                        val followUp = System.currentTimeMillis() < followUpUntil &&
+                            text.any { it.isLetterOrDigit() }
+                        if (followUp || woke || WakeWord.matches(text, settings.wakePhrase)) {
                             // the transcriber may spell the wake word slightly off
                             // ("Orbic"), so the echo is removed with the same fuzzy
                             // rules that matched it in the first place
@@ -453,6 +490,8 @@ class OrbCore private constructor(private val appContext: Context) {
                             android.util.Log.i("OrbHermes", "wake: heard=\"$text\" remainder=\"$remainder\"")
                             handler.post {
                                 if (phase == OrbPhase.STANDBY) {
+                                    // the window is over: this question counts
+                                    followUpUntil = 0L
                                     wakeUp(remainder)
                                     // The clip that carried the wake word is the
                                     // first part of the utterance, so it is kept
@@ -504,6 +543,36 @@ class OrbCore private constructor(private val appContext: Context) {
             onDone = { if (!handedOff.get()) release() },
             // the wake check has a 30 second read timeout of its own, so this
             // only fires when the request is stuck in a socket write
+            deadlineMs = 40_000L,
+        )
+    }
+
+    /**
+     * Listens for a command to stop the orb while it is talking.
+     *
+     * The phone is the speaker, so the microphone hears the orb's own answer
+     * as well as the person. An echo canceller takes most of that out, the
+     * parser only accepts a phrase that is nothing but a stop command, and a
+     * phrase the orb is saying right now is ignored anyway.
+     */
+    private fun checkForStop(wav: ByteArray) {
+        if (!settings.interruptByVoice) return
+        uploads.submit(
+            work = {
+                val text = try {
+                    client().transcribe(wav).value?.trim().orEmpty()
+                } catch (e: Exception) {
+                    ""
+                }
+                val isCommand = text.isNotEmpty() && Command.isStop(text) &&
+                    // the orb's own voice is not a command
+                    !speakingText.contains(text, ignoreCase = true)
+                if (isCommand) {
+                    android.util.Log.i("OrbHermes", "heard a stop command: $text")
+                    handler.post { stopSpeakingNow() }
+                }
+            },
+            onDone = {},
             deadlineMs = 40_000L,
         )
     }
@@ -648,21 +717,29 @@ class OrbCore private constructor(private val appContext: Context) {
             return
         }
         phase = OrbPhase.SPEAKING
+        speakingText = text
         touch()
         setStatus("Speaking…")
         setMicMuted(true)
         if (settings.preferCloudVoice) {
-            replyExecutor.execute {
-                val result = try {
-                    client().synthesize(text, settings.voiceId)
-                } catch (e: Exception) {
-                    VoiceClient.Result(false, null, e.message ?: "tts failed")
-                }
-                handler.post {
-                    if (result.ok && result.value != null && result.value!!.isNotEmpty()) {
-                        playRemoteAudio(result.value!!)
-                    } else {
-                        speakLocally(text)
+            val pieces = Command.sentences(text)
+            if (pieces.size > 1) {
+                // the answer is read out in pieces, so the first words are
+                // playing while the rest is still being made
+                speakInPieces(pieces)
+            } else {
+                replyExecutor.execute {
+                    val result = try {
+                        client().synthesize(text, settings.voiceId)
+                    } catch (e: Exception) {
+                        VoiceClient.Result(false, null, e.message ?: "tts failed")
+                    }
+                    handler.post {
+                        if (result.ok && result.value != null && result.value!!.isNotEmpty()) {
+                            playRemoteAudio(result.value!!)
+                        } else {
+                            speakLocally(text)
+                        }
                     }
                 }
             }
@@ -671,10 +748,83 @@ class OrbCore private constructor(private val appContext: Context) {
         }
     }
 
+    /**
+     * Reads the answer out in pieces.
+     *
+     * One request for the whole answer means nothing is heard until the whole
+     * thing has been made - and on a slow machine that is most of the wait.
+     * One request per piece means the first words are playing while the rest
+     * is still being made.
+     */
+    private fun speakInPieces(pieces: List<String>) {
+        val generation = speakGeneration.incrementAndGet()
+        speakPieces.clear()
+        for (i in pieces.indices) speakPieces.add(null)
+        speakNext = 0
+        speakFilled.set(0)
+        for ((index, piece) in pieces.withIndex()) {
+            speakExecutor.execute {
+                val bytes = try {
+                    val result = client().synthesize(piece, settings.voiceId)
+                    if (result.ok) result.value else null
+                } catch (e: Exception) {
+                    null
+                }
+                handler.post {
+                    // the answer was cut off while this piece was being made
+                    if (generation != speakGeneration.get()) return@post
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        speakPieces[index] = bytes
+                    }
+                    speakFilled.incrementAndGet()
+                    playReadyPieces()
+                }
+            }
+        }
+    }
+
+    /**
+     * Plays the pieces that are ready, in order.
+     *
+     * A piece that could not be made is skipped - the rest of the answer is
+     * still worth hearing.
+     */
+    private fun playReadyPieces() {
+        if (player != null) return
+        while (speakNext < speakPieces.size) {
+            val bytes = speakPieces[speakNext]
+            if (bytes == null) {
+                if (speakFilled.get() >= speakPieces.size) {
+                    // this piece failed and everything else is in: skip it
+                    speakNext++
+                    continue
+                }
+                // not made yet: the rest waits
+                return
+            }
+            speakNext++
+            playRemoteAudio(bytes)
+            return
+        }
+        if (speakFilled.get() >= speakPieces.size) {
+            if (speakNext == 0) {
+                // not one piece could be made: the phone's own voice is better
+                // than silence
+                speakLocally(speakingText)
+            } else {
+                onSpeechFinished()
+            }
+        }
+    }
+
     private fun playRemoteAudio(bytes: ByteArray) {
         try {
             stopSpeaking()
-            val file = File(appContext.cacheDir, "hermes_reply.mp3")
+            // one file per piece: the next one must not overwrite the audio
+            // that is still playing
+            File(appContext.cacheDir, "hermes_reply_$replyFile.mp3").delete()
+            replyFile++
+            val file = File(appContext.cacheDir, "hermes_reply_$replyFile.mp3")
             file.writeBytes(bytes)
             val mp = MediaPlayer()
             mp.setAudioAttributes(
@@ -688,13 +838,13 @@ class OrbCore private constructor(private val appContext: Context) {
                 it.release()
                 player = null
                 releaseVisualizer()
-                onSpeechFinished()
+                afterPiece()
             }
             mp.setOnErrorListener { m, _, _ ->
                 m.release()
                 player = null
                 releaseVisualizer()
-                onSpeechFinished()
+                afterPiece()
                 true
             }
             mp.prepare()
@@ -702,7 +852,16 @@ class OrbCore private constructor(private val appContext: Context) {
             mp.start()
             player = mp
         } catch (e: Exception) {
+            afterPiece()
+        }
+    }
+
+    /** A piece of the answer has ended: the next one starts, or the reply is over. */
+    private fun afterPiece() {
+        if (speakPieces.isEmpty()) {
             onSpeechFinished()
+        } else {
+            playReadyPieces()
         }
     }
 
@@ -766,14 +925,31 @@ class OrbCore private constructor(private val appContext: Context) {
 
     private fun onSpeechFinished() {
         setMicMuted(false)
+        speakingText = ""
+        // the orb's own voice is still in the detector - it must not become the
+        // beginning of the next utterance
+        streamer?.reset()
         phase = OrbPhase.AWAKE
         lastVoiceAt = System.currentTimeMillis()
         touch()
-        setStatus("Listening…")
+        // the orb keeps listening for a moment, so the next question can be
+        // asked without the wake word - and the sign says so
+        openFollowUp()
         scheduleTranscriptHide(TRANSCRIPT_LINGER_MS)
         handler.postDelayed({
             if (phase == OrbPhase.AWAKE) finishUtterance()
         }, 900)
+    }
+
+    /**
+     * Opens the window in which the next question needs no wake word.
+     *
+     * The orb listened after a reply anyway - what was missing was the sign
+     * that said so, so the person knows they can simply carry on talking.
+     */
+    private fun openFollowUp() {
+        followUpUntil = System.currentTimeMillis() + FOLLOW_UP_MS
+        setStatus("Go on…")
     }
 
     private fun initLocalTts() {
@@ -814,10 +990,32 @@ class OrbCore private constructor(private val appContext: Context) {
      * The levels are dropped as well: the microphone would only hear the
      * speaker, and the orb should breathe with its own reply, not with the
      * echo of it.
+     *
+     * The capture itself keeps running. The echo canceller takes the orb's own
+     * voice out of the microphone, so a person can still cut the reply short
+     * by saying "stop".
      */
     private fun setMicMuted(value: Boolean) {
         micMuted = value
-        streamer?.setMuted(value)
+    }
+
+    /**
+     * Cuts the reply short.
+     *
+     * The tap on the orb does this, and so does saying "stop" while the orb is
+     * talking.
+     */
+    fun stopSpeakingNow() {
+        if (phase != OrbPhase.SPEAKING) return
+        android.util.Log.i("OrbHermes", "the reply was cut off")
+        // the pieces that are still being made are dropped
+        speakGeneration.incrementAndGet()
+        speakPieces.clear()
+        speakNext = 0
+        stopSpeaking()
+        phase = OrbPhase.STANDBY
+        touch()
+        openFollowUp()
     }
 
     private fun stopSpeaking() {
@@ -907,6 +1105,11 @@ class OrbCore private constructor(private val appContext: Context) {
                 // state transitions
                 if (phase == OrbPhase.AWAKE) {
                     val quiet = now - lastVoiceAt
+                    // the window for a question without the wake word is over
+                    if (followUpUntil > 0L && now > followUpUntil) {
+                        followUpUntil = 0L
+                        setStatus("Listening…")
+                    }
                     // the sentence is only over when the microphone has gone
                     // quiet and every recording that was sent has come back -
                     // otherwise the last words are still on their way
@@ -1009,6 +1212,12 @@ class OrbCore private constructor(private val appContext: Context) {
 
         /** How long the orb waits for a command before going back to standby. */
         private const val IDLE_MS = 25_000L
+
+        /**
+         * How long after an answer the next question may come without the wake
+         * word.
+         */
+        private const val FOLLOW_UP_MS = 6_000L
 
         /**
          * How long the microphone may return nothing but silence before the
