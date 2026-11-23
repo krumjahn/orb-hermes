@@ -87,7 +87,7 @@ PLACEHOLDER_MARKERS = (
 CONTEXT_MAX_CHARS = 6000
 # Which build is running. /health reports it, so it is always obvious which
 # copy of the bridge the orb is really talking to.
-BRIDGE_VERSION = os.environ.get("BRIDGE_VERSION", "2026-11-19f").strip()
+BRIDGE_VERSION = os.environ.get("BRIDGE_VERSION", "2026-11-23a").strip()
 
 # Probe results, so a missing or broken agent is not paid for on every chat.
 _api_ok = False
@@ -1602,8 +1602,19 @@ def _spoken_form(word):
 
 
 def _consonants(word):
-    """The consonants of a word: the skeleton a listener hears."""
-    return "".join(ch for ch in word if ch not in "aeiou")
+    """The consonants of a word: the skeleton a listener hears.
+
+    The endings a transcriber gets wrong are forgiven, so "orbits" and
+    "orbids" have the same skeleton.
+    """
+    skeleton = "".join(ch for ch in word if ch not in "aeiou")
+    if skeleton.endswith("ts"):
+        skeleton = skeleton[:-1]
+    elif skeleton.endswith("ds"):
+        skeleton = skeleton[:-2] + "t"
+    elif skeleton.endswith("d"):
+        skeleton = skeleton[:-1] + "t"
+    return skeleton
 
 
 def _sounds_like(candidate, alias):
@@ -1631,11 +1642,26 @@ def _sounds_like(candidate, alias):
 
 
 def _is_clipped_word(candidate, aliases):
-    """A word the transcriber cut short: "Or" instead of "Orbit"."""
-    if len(candidate) < 2:
+    """A word the transcriber cut short: "Orb" instead of "Orbit".
+
+    The fragment has to keep at least three letters and two of the phrase's
+    consonants. A bare "or" is far too common in ordinary speech - "or not",
+    "or maybe", "or the" all start with one - and treating it as the wake
+    word woke the orb on nearly every sentence that came out of a
+    television.
+    """
+    if len(candidate) < 3:
         return False
     spoken = _spoken_form(candidate)
-    return any(len(a) > len(spoken) and a.startswith(spoken) for a in aliases)
+    skeleton = _consonants(spoken)
+    if len(skeleton) < 2:
+        return False
+    return any(
+        len(a) > len(spoken)
+        and a.startswith(spoken)
+        and skeleton in _consonants(a)
+        for a in aliases
+    )
 
 
 def _starts_utterance(words, index):
@@ -1643,6 +1669,31 @@ def _starts_utterance(words, index):
     if index == 0:
         return True
     return index == 1 and words[0] in LEADING_NOISE
+
+
+def _is_bare_clipped_word(words, index, aliases):
+    """The wake word was cut short to a bare "or".
+
+    "or" is a perfectly ordinary English word, and treating it as the wake
+    word woke the orb on nearly every sentence that started with one: "or
+    not", "or maybe", "or the". A dictionary of 197,000 words gave 196,344
+    such pairs.
+
+    It is still a real case - whisper sometimes leaves nothing but "or"
+    behind - so it counts when it is all the transcriber heard. A sentence
+    that carries on after it is a sentence, not a wake word.
+    """
+    candidate = words[index]
+    if len(candidate) != 2:
+        return False
+    if not any(
+        len(a) > len(candidate) and a.startswith(candidate) for a in aliases
+    ):
+        return False
+    # it has to be the whole utterance, apart from a politeness word
+    if index == 0:
+        return len(words) == 1
+    return index == 1 and len(words) == 2 and words[0] in LEADING_NOISE
 
 
 def _wake_candidates(words, start, size):
@@ -1661,14 +1712,35 @@ def _wake_candidates(words, start, size):
     return candidates
 
 
+def _sounds_like_joined(joined, alias):
+    """Does a joined run of words sound like the phrase?
+
+    Spelling is far too loose for a joined run: "or not" is two edits away
+    from "orbit" and "for a bit" is only one, and both of them are
+    ordinary English. The consonants are what a listener hears, so the run
+    has to carry the same ones as the word itself.
+    """
+    if not 3 <= len(joined) <= 12:
+        return False
+    spoken = _spoken_form(joined)
+    if spoken == alias:
+        return True
+    if _consonants(spoken) != _consonants(alias):
+        return False
+    return _levenshtein(spoken, alias) <= 2
+
+
 def _fuzzy_wake_hit(joined, tokens):
     """Fuzzy match of one joined candidate against the wake phrase.
 
     A single spoken token may be one character off ("orbt" -> "orbit") and may
-    even sound different but identical ("Horbid" -> "orbit"). Two tokens may
-    be two characters off, but only when they start the same way as the
-    phrase, so "for a bit" is never mistaken for "orbit" while "or bid" still
-    wakes the orb up.
+    even sound different but identical ("Horbid" -> "orbit").
+
+    A joined run of words has to *sound* like the phrase as well. Spelling
+    alone is far too loose here: "or not" is only two edits away from
+    "orbit", and a television talking about anything at all woke the orb.
+    "or bid" and "or a bit" still work, because they carry the consonants of
+    the word.
     """
     for alias in WAKE_PHRASES:
         if tokens == 1:
@@ -1676,12 +1748,8 @@ def _fuzzy_wake_hit(joined, tokens):
                 return True
             if _sounds_like(joined, alias):
                 return True
-        elif tokens == 2:
-            if (
-                len(alias) >= 2
-                and joined.startswith(alias[:2])
-                and _levenshtein(joined, alias) <= 2
-            ):
+        else:
+            if _sounds_like_joined(joined, alias):
                 return True
     return False
 
@@ -1706,6 +1774,10 @@ def _match_at(words, index):
         and _starts_utterance(words, index)
         and _is_clipped_word(words[index], WAKE_PHRASES)
     ):
+        return 1
+    # a bare "or" is the one fragment that is too common to trust, so it
+    # only counts when it is all the transcriber heard
+    if index < len(words) and _is_bare_clipped_word(words, index, WAKE_PHRASES):
         return 1
     return 0
 

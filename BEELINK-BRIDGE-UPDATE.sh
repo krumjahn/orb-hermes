@@ -55,7 +55,7 @@ TOKEN="YOUR_BRIDGE_TOKEN"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BRIDGE_DIR="$HOME/orb-hermes"
 RUN_SCRIPT="$BRIDGE_DIR/run-bridge.sh"
-EXPECTED_VERSION="2026-11-19f"
+EXPECTED_VERSION="2026-11-23a"
 # where the process information lives. It is /proc on Linux; the override is
 # only there so the logic can be tested without a Linux kernel.
 PROC="${PROC:-/proc}"

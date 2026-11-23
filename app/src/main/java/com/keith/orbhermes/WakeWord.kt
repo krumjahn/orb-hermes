@@ -61,12 +61,17 @@ object WakeWord {
                 if (fuzzyHit(candidate, n, aliases)) return n
             }
         }
-        // A clipped wake word ("Or" instead of "Orbit") only counts at the
-        // front of the utterance, because "or" on its own is a perfectly
+        // A clipped wake word ("Orb" instead of "Orbit") only counts at the
+        // front of the utterance, because the fragment is a perfectly
         // ordinary English word and must not wake the orb mid-sentence.
         if (index < words.size && startsUtterance(words, index) &&
             isClippedWord(words[index], aliases)
         ) {
+            return 1
+        }
+        // A bare "or" is the one fragment that is too common to trust, so it
+        // only counts when it is all the transcriber heard.
+        if (index < words.size && isBareClippedWord(words, index, aliases)) {
             return 1
         }
         return 0
@@ -75,15 +80,26 @@ object WakeWord {
     /**
      * A word the transcriber cut short.
      *
-     * Whisper regularly drops the end of the wake word and leaves "or"
-     * behind. That only counts at the front of the utterance, because "or" on
-     * its own is a perfectly ordinary English word and must not wake the orb
-     * in the middle of a sentence.
+     * Whisper regularly drops the end of the wake word and leaves "orb"
+     * behind. That only counts at the front of the utterance, because the
+     * fragment is a perfectly ordinary English word and must not wake the
+     * orb in the middle of a sentence.
+     *
+     * The fragment has to keep at least three letters and two of the
+     * phrase's consonants. A bare "or" is far too common in ordinary
+     * speech - "or not", "or maybe", "or the" all start with one - and
+     * treating it as the wake word woke the orb on nearly every sentence
+     * that came out of a television.
      */
     private fun isClippedWord(candidate: String, aliases: Set<String>): Boolean {
-        if (candidate.length < 2) return false
+        if (candidate.length < 3) return false
         val spoken = spokenForm(candidate)
-        return aliases.any { it.length > spoken.length && it.startsWith(spoken) }
+        val skeleton = consonants(spoken)
+        if (skeleton.length < 2) return false
+        return aliases.any {
+            it.length > spoken.length && it.startsWith(spoken) &&
+                skeleton in consonants(it)
+        }
     }
 
     /** The wake word is said first, so only the front of the utterance counts. */
@@ -93,27 +109,69 @@ object WakeWord {
     }
 
     /**
+     * The wake word was cut short to a bare "or".
+     *
+     * "or" is a perfectly ordinary English word, and treating it as the wake
+     * word woke the orb on nearly every sentence that started with one:
+     * "or not", "or maybe", "or the". A dictionary of 197,000 words gave
+     * 196,344 such pairs.
+     *
+     * It is still a real case - whisper sometimes leaves nothing but "or"
+     * behind - so it counts when it is all the transcriber heard. A
+     * sentence that carries on after it is a sentence, not a wake word.
+     */
+    private fun isBareClippedWord(
+        words: List<String>,
+        index: Int,
+        aliases: Set<String>,
+    ): Boolean {
+        val candidate = words[index]
+        if (candidate.length != 2) return false
+        if (!aliases.any { it.length > candidate.length && it.startsWith(candidate) }) {
+            return false
+        }
+        // it has to be the whole utterance, apart from a politeness word
+        if (index == 0) return words.size == 1
+        return index == 1 && words.size == 2 && words[0] in LEADING_NOISE
+    }
+
+    /**
      * Fuzzy match of one candidate against the phrase's aliases.
      *
-     * A single spoken token may be one character off ("orbt" -> "orbit"). Two
-     * tokens may be two characters off, but only when they start the same way
-     * as the phrase, so "for a bit" is never mistaken for "orbit" while
-     * "or bid" still wakes the orb up.
+     * A single spoken token may be one character off ("orbt" -> "orbit").
+     *
+     * A joined run of words has to *sound* like the phrase as well. Spelling
+     * alone is far too loose here: "or not" is only two edits away from
+     * "orbit", and a television talking about anything at all would wake the
+     * orb. "or bid" and "or a bit" still work, because they carry the
+     * consonants of the word.
      */
     private fun fuzzyHit(candidate: String, tokens: Int, aliases: Set<String>): Boolean {
         for (alias in aliases) {
             if (tokens == 1) {
                 if (candidate.length in 3..8 && levenshtein(candidate, alias) <= 1) return true
                 if (soundsLike(candidate, alias)) return true
-            } else if (tokens == 2) {
-                if (alias.length >= 2 && candidate.startsWith(alias.take(2)) &&
-                    levenshtein(candidate, alias) <= 2
-                ) {
-                    return true
-                }
+            } else {
+                if (soundsLikeJoined(candidate, alias)) return true
             }
         }
         return false
+    }
+
+    /**
+     * Does a joined run of words sound like the phrase?
+     *
+     * Spelling is far too loose for a joined run: "or not" is two edits away
+     * from "orbit" and "for a bit" is only one, and both of them are
+     * ordinary English. The consonants are what a listener hears, so the run
+     * has to carry the same ones as the word itself.
+     */
+    private fun soundsLikeJoined(candidate: String, alias: String): Boolean {
+        if (candidate.length !in 3..12) return false
+        val spoken = spokenForm(candidate)
+        if (spoken == alias) return true
+        if (consonants(spoken) != consonants(alias)) return false
+        return levenshtein(spoken, alias) <= 2
     }
 
     /**
@@ -154,8 +212,23 @@ object WakeWord {
         return out
     }
 
-    /** The consonants of a word: the skeleton a listener hears. */
-    private fun consonants(word: String): String = word.filter { it !in "aeiou" }
+    /**
+     * The consonants of a word: the skeleton a listener hears.
+     *
+     * The endings a transcriber gets wrong are forgiven, so "orbits" and
+     * "orbids" have the same skeleton.
+     */
+    private fun consonants(word: String): String {
+        var skeleton = word.filter { it !in "aeiou" }
+        if (skeleton.endsWith("ts")) {
+            skeleton = skeleton.dropLast(1)
+        } else if (skeleton.endsWith("ds")) {
+            skeleton = skeleton.dropLast(2) + "t"
+        } else if (skeleton.endsWith("d")) {
+            skeleton = skeleton.dropLast(1) + "t"
+        }
+        return skeleton
+    }
 
     /**
      * Removes leading wake words from a transcript.

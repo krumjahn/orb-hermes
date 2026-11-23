@@ -17,6 +17,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.math.sqrt
 
@@ -196,6 +197,35 @@ class OrbCore private constructor(private val appContext: Context) {
      */
     private val utteranceAudio = Utterance()
 
+    /**
+     * Numbers the clips in the order they were recorded.
+     *
+     * A clip is uploaded in the background, so two of them can be in flight at
+     * once and their answers can come back in either order. The number makes
+     * sure the utterance is put together in the order the words were spoken,
+     * and that a clip is never added twice.
+     */
+    private val chunkSeq = AtomicLong(0)
+
+    /** The number of the last clip that went into the current utterance. */
+    private var lastUtteranceSeq = 0L
+
+    /** False once the utterance has been closed and handed to the agent. */
+    private var utteranceOpen = false
+
+    /**
+     * Adds a clip to the utterance, in the order the clips were recorded.
+     *
+     * A clip that was uploaded before the wake word was heard can come back
+     * after it. It belongs to the same question, so it is kept - as long as
+     * it really comes after the clip that carried the wake word.
+     */
+    private fun addToUtterance(wav: ByteArray, seq: Long) {
+        if (!utteranceOpen || seq <= lastUtteranceSeq) return
+        lastUtteranceSeq = seq
+        utteranceAudio.add(wav)
+    }
+
     private var started = false
     private var tickerRunning = false
 
@@ -317,6 +347,11 @@ class OrbCore private constructor(private val appContext: Context) {
         utterance.setLength(0)
         utteranceAudio.clear()
         droppedChunks = 0
+        // The utterance is open. The clips that come back from the bridge now
+        // belong to this question - including the ones that were uploaded
+        // before the wake word was heard and only answered afterwards.
+        utteranceOpen = true
+        lastUtteranceSeq = 0L
         if (command.isNotBlank()) utterance.append(command.trim()).append(' ')
         // The sentence is only over once the microphone goes quiet. The
         // clock starts when the wake happened, but the capture thread takes
@@ -457,6 +492,9 @@ class OrbCore private constructor(private val appContext: Context) {
             return
         }
         pendingUploads.incrementAndGet()
+        // the number this clip was recorded under, so the utterance can be put
+        // together in the order the words were spoken
+        val seq = chunkSeq.incrementAndGet()
         // the count has to come down exactly once, however the upload ends:
         // when it finishes, when it fails, and when it is given up on
         val counted = AtomicBoolean(true)
@@ -498,7 +536,18 @@ class OrbCore private constructor(private val appContext: Context) {
                                     // with the rest of it. The whole sentence is
                                     // transcribed in one go at the end, and a cut
                                     // in the middle of a word then costs nothing.
-                                    utteranceAudio.add(wav)
+                                    // Only clips recorded after this one may
+                                    // follow it in the utterance.
+                                    lastUtteranceSeq = seq - 1
+                                    addToUtterance(wav, seq)
+                                } else if (phase == OrbPhase.AWAKE && utteranceOpen) {
+                                    // The wake word was heard in an earlier clip,
+                                    // but this one was recorded after it and its
+                                    // answer only came back afterwards. It is part
+                                    // of the same question, and it used to be
+                                    // thrown away - which cut the question off
+                                    // after the first few words.
+                                    addToUtterance(wav, seq)
                                 }
                             }
                         }
@@ -513,7 +562,7 @@ class OrbCore private constructor(private val appContext: Context) {
                                 if (phase == OrbPhase.AWAKE) {
                                     // keep the audio too, so the whole utterance
                                     // can be transcribed in one go at the end
-                                    utteranceAudio.add(wav)
+                                    addToUtterance(wav, seq)
                                     // the first chunk usually still carries the wake
                                     // word itself - only the first one is stripped
                                     val text = if (utterance.isEmpty()) {
@@ -591,6 +640,9 @@ class OrbCore private constructor(private val appContext: Context) {
         utterance.setLength(0)
         utteranceAudio.clear()
         droppedChunks = 0
+        // the utterance is closed: a clip that comes back now belongs to the
+        // question that is already on its way to the agent
+        utteranceOpen = false
         if (clips.isEmpty() && audio == null) {
             phase = OrbPhase.STANDBY
             setStatus("Say “${settings.wakePhrase}”")

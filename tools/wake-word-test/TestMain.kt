@@ -28,10 +28,31 @@ fun main() {
         "Horbid, what do you know about me?" to true,
         "Horbit what time is it" to true,
         "orbot what time is it" to true,
-        // the wake word clipped down to "or" - only at the front of a phrase
-        "or what time is it" to true,
+        // the wake word clipped down to "orb" - it keeps its consonants
+        "orb" to true,
+        "hey orb" to true,
+        // a bare "or" is only the wake word when it is all the transcriber
+        // heard: "or" on its own is an ordinary English word, and treating
+        // it as the wake word woke the orb on nearly every sentence that
+        // started with one
+        "or" to true,
+        "hey or" to true,
+        "or what time is it" to false,
+        "hey or what time is it" to false,
         "Or, but what time is it?" to true,
-        "hey or what time is it" to true,
+        // a joined run of words has to sound like the word, not merely be a
+        // couple of edits away from it: "or not" is "ornot", and that is
+        // what a television said while the orb was listening
+        "or not" to false,
+        "or not at all" to false,
+        "or maybe" to false,
+        "or something" to false,
+        "or the" to false,
+        "or just" to false,
+        "or buy" to false,
+        "or ant" to false,
+        "or wet" to false,
+        "longer, they gained about an extra hour or not." to false,
         // words that merely look or sound similar must not wake the orb
         "a rabbit" to false,
         "herb" to false,
@@ -52,9 +73,12 @@ fun main() {
         "hey orbit set a timer" to "set a timer",
         "or bid what time is it" to "what time is it",
         "Horbid what do you know about me" to "what do you know about me",
-        "or what time is it" to "what time is it",
+        "or what time is it" to "or what time is it",
         "or but what time is it" to "what time is it",
-        "hey or what time is it" to "what time is it",
+        "hey or what time is it" to "hey or what time is it",
+        "orb what time is it" to "what time is it",
+        "or" to "",
+        "or not" to "or not",
         "my habit is reading" to "my habit is reading",
         "a rabbit" to "a rabbit",
         "what time is it" to "what time is it",

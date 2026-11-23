@@ -71,6 +71,19 @@ class ClipWindow(
         private set
 
     /**
+     * The level the speaker reached.
+     *
+     * This phone's microphone is quiet. A voice only reaches about 0.02 and a
+     * room with a television in it reaches 0.01, so a bar that sits three
+     * times above the noise leaves the voice underneath it - the question is
+     * then either missed altogether or cut off in the middle of a word.
+     *
+     * The speaker's own level is what the bar is measured against, so a
+     * louder room cannot hide a voice that was heard a moment ago.
+     */
+    private var speechLevel: Float = 0f
+
+    /**
      * Feed one frame of audio. Returns a clip when one is ready, otherwise
      * null. The first clip of an utterance starts [marginBytes] before the
      * detected onset; later clips continue where the previous one ended.
@@ -82,7 +95,26 @@ class ClipWindow(
         if (level < noiseFloor * 2.2f) {
             noiseFloor = noiseFloor * 0.92f + level * 0.08f
         }
-        val threshold = max(noiseFloor * 3.2f, 0.012f)
+        // The bar a voice has to clear.
+        //
+        // Twice the room noise is enough on a normal microphone, but this
+        // one is quiet, so the bar is also never lower than 0.006 - and
+        // never higher than 0.02 either, or a voice that only reaches 0.02
+        // would stay under it in a room with a television in it.
+        var threshold = min(max(noiseFloor * 1.8f, 0.006f), 0.02f)
+        if (speechLevel > 0f) {
+            // While somebody is talking the bar drops to half of their own
+            // level. A voice that dips between the words must not cut the
+            // sentence in half - that is what turned "what's on my calendar"
+            // into "what's on my-".
+            //
+            // It never goes below the room noise, or the sentence would
+            // never end.
+            threshold = min(
+                threshold,
+                max(speechLevel * 0.5f, noiseFloor * 1.3f),
+            )
+        }
         this.threshold = threshold
         this.noiseFloor = noiseFloor
 
@@ -91,6 +123,8 @@ class ClipWindow(
         if (level > threshold) {
             silentFrames = 0
             quietBytes = 0
+            // the level the speaker reached, for the bar above
+            speechLevel = max(level, speechLevel * 0.995f)
             if (speechStart < 0) {
                 // the speech begins in this frame - remember exactly where
                 speechStart = pending.size() - length
@@ -99,6 +133,9 @@ class ClipWindow(
         } else {
             silentFrames++
             quietBytes += length
+            // the speaker's level is forgotten slowly, so a pause in the
+            // middle of a sentence does not raise the bar again
+            speechLevel *= 0.995f
         }
 
         // The speaker has gone quiet. The audio that is still buffered is the
@@ -178,6 +215,8 @@ class ClipWindow(
         continuation = false
         silentFrames = 0
         quietBytes = 0
+        // the orb's own voice is not the speaker's voice
+        speechLevel = 0f
     }
 
     companion object {

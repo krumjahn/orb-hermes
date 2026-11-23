@@ -282,6 +282,59 @@ fun main() {
         )
     }
 
+    // 12. a quiet voice in a quiet room is heard
+    //     These are the levels this phone's microphone actually produces: the
+    //     room sits at about 0.0035 and a voice at about 0.02. A bar that
+    //     sits three times above the noise leaves the voice under it, and
+    //     the question is then never heard at all.
+    run {
+        val w = newWindow()
+        var clip: ByteArray? = null
+        repeat(100) { w.accept(frame(115), FRAME_BYTES) }       // the room at 0.0035
+        repeat(120) {
+            val c = w.accept(frame(655), FRAME_BYTES)            // the voice at 0.02
+            if (c != null && clip == null) clip = c
+        }
+        check("a quiet voice in a quiet room is heard", clip != null)
+    }
+
+    // 13. a quiet voice is still heard when the room is louder
+    //     With a television in the room the noise rises to about 0.012 while
+    //     the voice stays at about 0.024. The bar used to follow the room up
+    //     to 0.039 and the voice never got over it.
+    run {
+        val w = newWindow()
+        var clip: ByteArray? = null
+        repeat(150) { w.accept(frame(400), FRAME_BYTES) }       // the room at 0.0122
+        repeat(120) {
+            val c = w.accept(frame(786), FRAME_BYTES)            // the voice at 0.024
+            if (c != null && clip == null) clip = c
+        }
+        check("a quiet voice is heard in a louder room", clip != null)
+    }
+
+    // 14. a dip between the words does not cut the sentence in half
+    //     The bar follows the speaker while they are talking, so a voice
+    //     that gets quieter between two words is still speech. This is what
+    //     turned "what's on my calendar" into "what's on my-".
+    run {
+        val w = newWindow()
+        repeat(100) { w.accept(frame(115), FRAME_BYTES) }       // the room at 0.0035
+        repeat(40) { w.accept(frame(655), FRAME_BYTES) }        // the voice at 0.02
+        repeat(150) { w.accept(frame(295), FRAME_BYTES) }       // a dip to 0.009
+        check("a dip between the words does not end the utterance", w.speaking)
+        check("the bar stayed under the voice", w.threshold < 0.009f)
+    }
+
+    // 15. a real pause does end the utterance
+    run {
+        val w = newWindow()
+        repeat(100) { w.accept(frame(115), FRAME_BYTES) }
+        repeat(40) { w.accept(frame(655), FRAME_BYTES) }
+        repeat(SILENCE_FRAMES + 20) { w.accept(frame(115), FRAME_BYTES) }
+        check("a real pause ends the utterance", !w.speaking)
+    }
+
     if (failures == 0) {
         println("ALL CLIP WINDOW TESTS PASS")
     } else {

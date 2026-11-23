@@ -24,6 +24,7 @@ Usage:
 """
 import datetime
 import json
+import re
 import socket
 import socketserver
 import struct
@@ -75,6 +76,203 @@ def response_body(response: bytes) -> str:
     if b"audio" in head.lower() or len(body) > 400:
         return ""
     return body.decode(errors="replace").strip()
+
+
+# ------------------------------------------------------------------ wake word
+#
+# The bridge and the phone both run the same wake-word rules, and this is a
+# third copy of them. It exists so a bridge that has not been updated yet
+# cannot wake the orb on a television talking in the next room: the bridge
+# says "yes, that was the wake word", this says "no it was not", and the
+# orb stays asleep.
+#
+# The copies are kept honest by tools/test-bridge-wake.py, which runs the
+# same list of cases against the bridge's copy and this one.
+
+WAKE_PHRASE = "orbit"
+WAKE_FILLERS = {"a", "uh", "um", "u", "er", "erm", "the", "hmm", "mm", "h", "m"}
+WAKE_LEADING = {"hey", "hi", "ok", "okay", "yo", "so", "well", "uh", "um"}
+
+
+def _wake_levenshtein(a, b):
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(
+                min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            )
+        previous = current
+    return previous[-1]
+
+
+def _wake_spoken(word):
+    """The word as it is actually pronounced."""
+    if len(word) > 2 and word[0] == "h" and word[1] in "aeiou":
+        word = word[1:]
+    if len(word) > 2 and word.endswith("d"):
+        word = word[:-1] + "t"
+    return word
+
+
+def _wake_consonants(word):
+    """The consonants of a word, forgiving the endings a transcriber gets wrong."""
+    skeleton = "".join(ch for ch in word if ch not in "aeiou")
+    if skeleton.endswith("ts"):
+        skeleton = skeleton[:-1]
+    elif skeleton.endswith("ds"):
+        skeleton = skeleton[:-2] + "t"
+    elif skeleton.endswith("d"):
+        skeleton = skeleton[:-1] + "t"
+    return skeleton
+
+
+def _wake_aliases(phrase):
+    compact = "".join(phrase.lower().split())
+    return {compact, compact + "s", compact + "es"}
+
+
+def _wake_sounds_like(candidate, alias):
+    if not 3 <= len(candidate) <= 8:
+        return False
+    spoken = _wake_spoken(candidate)
+    if spoken == alias:
+        return True
+    if len(spoken) >= len(alias) - 1 and _wake_levenshtein(spoken, alias) <= 1:
+        return True
+    if _wake_consonants(spoken) != _wake_consonants(alias):
+        return False
+    if len(candidate) > len(alias) + 1:
+        return False
+    return _wake_levenshtein(spoken, alias) <= 2
+
+
+def _wake_sounds_like_joined(joined, alias):
+    """A joined run of words has to carry the consonants of the word."""
+    if not 3 <= len(joined) <= 12:
+        return False
+    spoken = _wake_spoken(joined)
+    if spoken == alias:
+        return True
+    if _wake_consonants(spoken) != _wake_consonants(alias):
+        return False
+    return _wake_levenshtein(spoken, alias) <= 2
+
+
+def _wake_is_clipped(candidate, aliases):
+    """A word the transcriber cut short: "orb" instead of "orbit"."""
+    if len(candidate) < 3:
+        return False
+    spoken = _wake_spoken(candidate)
+    skeleton = _wake_consonants(spoken)
+    if len(skeleton) < 2:
+        return False
+    return any(
+        len(a) > len(spoken)
+        and a.startswith(spoken)
+        and skeleton in _wake_consonants(a)
+        for a in aliases
+    )
+
+
+def _wake_is_bare_clipped(words, index, aliases):
+    """The wake word was cut short to a bare "or".
+
+    "or" is an ordinary English word, and treating it as the wake word woke
+    the orb on nearly every sentence that started with one. It still counts
+    when it is all the transcriber heard.
+    """
+    candidate = words[index]
+    if len(candidate) != 2:
+        return False
+    if not any(len(a) > len(candidate) and a.startswith(candidate) for a in aliases):
+        return False
+    if index == 0:
+        return len(words) == 1
+    return index == 1 and len(words) == 2 and words[0] in WAKE_LEADING
+
+
+def _wake_candidates(words, start, size):
+    window = words[start:start + size]
+    if not window:
+        return []
+    candidates = ["".join(window)]
+    stripped = [w for w in window if w not in WAKE_FILLERS]
+    if stripped and len(stripped) != len(window):
+        candidates.append("".join(stripped))
+    return candidates
+
+
+def _wake_match_at(words, index, aliases):
+    for size in (1, 2, 3):
+        if index + size > len(words):
+            break
+        for joined in _wake_candidates(words, index, size):
+            if joined in aliases:
+                return size
+            for alias in aliases:
+                if size == 1:
+                    if 3 <= len(joined) <= 8 and _wake_levenshtein(joined, alias) <= 1:
+                        return size
+                    if _wake_sounds_like(joined, alias):
+                        return size
+                elif _wake_sounds_like_joined(joined, alias):
+                    return size
+    if index < len(words):
+        if index == 0 or (index == 1 and words[0] in WAKE_LEADING):
+            if _wake_is_clipped(words[index], aliases):
+                return 1
+        if _wake_is_bare_clipped(words, index, aliases):
+            return 1
+    return 0
+
+
+def wake_detected(text):
+    """Does this transcript contain the wake word?"""
+    aliases = _wake_aliases(WAKE_PHRASE)
+    cleaned = re.sub(r"[^a-z\s]", " ", (text or "").lower())
+    words = [w for w in cleaned.split() if w]
+    for index in range(len(words)):
+        if _wake_match_at(words, index, aliases) > 0:
+            return True
+    return False
+
+
+def gate_wake_response(response: bytes, request_line: str) -> bytes:
+    """Keeps the bridge's wake decision honest.
+
+    Only the "wake" flag is touched - the transcript is the bridge's and is
+    passed on untouched.
+    """
+    if "/wake" not in request_line:
+        return response
+    head, sep, body = response.partition(b"\r\n\r\n")
+    if not sep:
+        return response
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return response
+    if not isinstance(payload, dict) or not payload.get("wake"):
+        return response
+    if wake_detected(payload.get("text") or ""):
+        return response
+    payload["wake"] = False
+    new_body = json.dumps(payload).encode("utf-8")
+    new_head = re.sub(
+        rb"(?im)^(Content-Length:[ \t]*)\d+[ \t]*$",
+        lambda m: m.group(1) + str(len(new_body)).encode(),
+        head,
+    )
+    if b"content-length" not in new_head.lower():
+        new_head = new_head + b"\r\nContent-Length: " + str(len(new_body)).encode()
+    return new_head + b"\r\n\r\n" + new_body
 
 
 # The model has no clock. Without this it answers "what time is it" with
@@ -414,6 +612,14 @@ class LocalHandler(socketserver.BaseRequestHandler):
                     time.sleep(RETRY_DELAY)
                     continue
                 break
+
+            # The bridge decides whether the wake word was heard. This is a
+            # second opinion: a bridge that has not been updated yet would
+            # wake the orb on a television talking in the next room.
+            gated = gate_wake_response(response, request_line)
+            if gated != response:
+                log(f"client {peer}: the wake word was not in the transcript")
+                response = gated
 
             sock.sendall(response)
             status = response.split(b"\r\n", 1)[0].decode(errors="replace")
