@@ -35,7 +35,7 @@ BRIDGE_DIR="${ORB_BRIDGE_DIR:-$HOME/orb-hermes}"
 BRIDGE_FILE="$BRIDGE_DIR/hermes_bridge.py"
 RUN_SCRIPT="$BRIDGE_DIR/run-bridge.sh"
 UNIT="orb-hermes.service"
-EXPECTED_VERSION="2026-11-19f"
+EXPECTED_VERSION="2026-11-23b"
 QUESTION="${ORB_QUESTION:-How are the Toronto Raptors doing this season?}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 

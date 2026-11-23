@@ -252,6 +252,7 @@ Everything can be checked offline, without a phone and without the agent:
 python3 tools/test-bridge-backend.py    # the bridge's model + agent discovery
 python3 tools/test-bridge-http.py       # the bridge's HTTP surface
 python3 tools/test-bridge-wake.py       # the bridge's wake matcher
+python3 tools/test-bridge-api.py        # the bridge and the Hermes API server
 python3 tools/test-relay.py             # the relay
 bash tools/test-installer-sandbox.sh    # the installer, against a fake server
 bash tools/test-bridge-version-sync.sh  # the bridge and the scripts agree
@@ -259,6 +260,41 @@ bash tools/test-bridge-version-sync.sh  # the bridge and the scripts agree
 
 The bridge and the phone run the **same** wake-word matching rules, and the
 tests check both copies, so they cannot drift apart.
+
+---
+
+## Why the answers take minutes, and what makes them fast
+
+The orb asks the agent a question and waits for the answer. There are two ways
+to reach the agent, and the difference between them is the difference between
+seconds and minutes:
+
+| | |
+|---|---|
+| **The CLI** — `hermes --query "…"` | A **fresh agent for every question**. It loads its model and its tools before it answers. Measured on the Beelink: 30 s to 9 minutes, and a cold model was measured at 232 s. |
+| **The API server** — `127.0.0.1:8642/v1` | The **same agent, already loaded**, serving an OpenAI-compatible API. The gateway keeps it warm, so a question is answered in seconds. |
+
+The API server is **off by default**. One script turns it on, gives the bridge
+its key and proves the whole path:
+
+```bash
+# on the Beelink, as the user that owns the Orb service
+curl -fsSL http://192.168.68.57:8899/BEELINK-API-SERVER.sh | bash
+```
+
+The script finds the gateway **by its service**, never by its command line — an
+earlier version searched for a process whose command line contained the word
+"gateway", and the Hermes CLI has a helper with that word in it. The helper was
+killed, and the gateway with it.
+
+The key is generated on the Beelink, written into `~/.hermes/.env` (the gateway
+reads it) and into the bridge's own environment (the bridge sends it), and it is
+never printed.
+
+> The bridge's probe of the API server has to carry the key. The server refuses
+> a request without one, and a refusal looks exactly like a server that is not
+> there — so the orb carried on using the CLI, which is where the minutes came
+> from. `tools/test-bridge-api.py` checks exactly that.
 
 ---
 

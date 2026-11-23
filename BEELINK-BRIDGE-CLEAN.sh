@@ -38,7 +38,7 @@ BRIDGE_DIR="${ORB_BRIDGE_DIR:-$HOME/orb-hermes}"
 BRIDGE_FILE="$BRIDGE_DIR/hermes_bridge.py"
 RUN_SCRIPT="$BRIDGE_DIR/run-bridge.sh"
 UNIT="orb-hermes.service"
-EXPECTED_VERSION="2026-11-19f"
+EXPECTED_VERSION="2026-11-23b"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }

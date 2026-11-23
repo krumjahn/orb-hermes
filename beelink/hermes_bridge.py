@@ -87,7 +87,7 @@ PLACEHOLDER_MARKERS = (
 CONTEXT_MAX_CHARS = 6000
 # Which build is running. /health reports it, so it is always obvious which
 # copy of the bridge the orb is really talking to.
-BRIDGE_VERSION = os.environ.get("BRIDGE_VERSION", "2026-11-23a").strip()
+BRIDGE_VERSION = os.environ.get("BRIDGE_VERSION", "2026-11-23b").strip()
 
 # Probe results, so a missing or broken agent is not paid for on every chat.
 _api_ok = False
@@ -210,22 +210,83 @@ def have(binary):
 # --------------------------------------------------------------------- Hermes
 
 
+def _api_headers():
+    """The headers the Hermes API server wants.
+
+    The server refuses a request without the bearer token, and a refusal
+    looks exactly like a server that is not there. So the probe has to
+    carry the token too - otherwise the bridge never notices the API
+    server that is sitting right in front of it.
+    """
+    if not HERMES_API_KEY:
+        return {}
+    return {"Authorization": f"Bearer {HERMES_API_KEY}"}
+
+
+_api_models_cache = []
+_api_models_at = 0.0
+
+
+def api_models():
+    """The models the Hermes API server serves, read once in a while.
+
+    The server names the model after the profile, which is not always
+    "hermes-agent", and a request for a model it does not know is refused.
+    So the list is read and the name is taken from it.
+    """
+    global _api_models_cache, _api_models_at
+    now = time.time()
+    if _api_models_cache and now < _api_models_at + 60.0:
+        return _api_models_cache
+    names = []
+    try:
+        req = urllib.request.Request(
+            f"{HERMES_BASE_URL}/models", headers=_api_headers()
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode())
+        for item in payload.get("data") or []:
+            name = (item.get("id") or "").strip()
+            if name:
+                names.append(name)
+    except Exception:
+        names = []
+    _api_models_cache = names
+    _api_models_at = now
+    return names
+
+
+def api_model_name():
+    """The model to ask the API server for."""
+    names = api_models()
+    if HERMES_MODEL in names:
+        return HERMES_MODEL
+    if names:
+        return names[0]
+    return HERMES_MODEL
+
+
 def hermes_api_chat(text, session):
-    """Call the Hermes OpenAI-compatible API server."""
+    """Call the Hermes OpenAI-compatible API server.
+
+    The API server keeps the agent - its model and its tools - loaded, so
+    this is the fast way to reach it. The CLI spawns a fresh agent for
+    every question, and that is what took minutes.
+    """
     body = {
-        "model": HERMES_MODEL,
+        "model": api_model_name(),
         "messages": [{"role": "user", "content": text}],
         "stream": False,
     }
+    headers = {"Content-Type": "application/json", **_api_headers()}
     if session:
-        body["session"] = session
+        # the server keeps the conversation under this header, so the orb
+        # can ask a follow-up question and the agent remembers the first one
+        headers["X-Hermes-Session-Id"] = session
     req = urllib.request.Request(
         f"{HERMES_BASE_URL}/chat/completions",
         data=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {HERMES_API_KEY}"} if HERMES_API_KEY else {}),
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=300) as resp:
         payload = json.loads(resp.read().decode())
@@ -799,10 +860,28 @@ def ollama_chat(text, session):
     raise RuntimeError(f"unexpected Ollama response: {str(payload)[:200]}")
 
 
+def api_status():
+    """What the Hermes API server looks like from here.
+
+    It is in /health so the state can be seen without a terminal on the
+    Beelink - the phone and the Mac can both read it.
+    """
+    reachable = hermes_api_reachable()
+    return {
+        "url": HERMES_BASE_URL,
+        "reachable": reachable,
+        "key_set": bool(HERMES_API_KEY),
+        "models": api_models(),
+        "model": api_model_name() if reachable else "",
+    }
+
+
 def hermes_available():
     """Is any Hermes backend reachable? Cheap probe, result cached briefly."""
     try:
-        req = urllib.request.Request(f"{HERMES_BASE_URL}/models", method="GET")
+        req = urllib.request.Request(
+            f"{HERMES_BASE_URL}/models", method="GET", headers=_api_headers()
+        )
         urllib.request.urlopen(req, timeout=3).read()
         return True
     except Exception:
@@ -821,19 +900,27 @@ def hermes_api_reachable():
 
     Without this a hung server would eat the whole chat timeout before the
     orb ever got to Ollama.
+
+    The probe carries the bearer token, because the server answers a
+    request without one with a refusal - and a refusal looks exactly like
+    a server that is not there.
     """
     global _api_ok, _api_ok_until
     now = time.time()
     if now < _api_ok_until:
         return _api_ok
     try:
-        req = urllib.request.Request(f"{HERMES_BASE_URL}/models", method="GET")
+        req = urllib.request.Request(
+            f"{HERMES_BASE_URL}/models", method="GET", headers=_api_headers()
+        )
         with urllib.request.urlopen(req, timeout=3) as resp:
             resp.read()
         _api_ok = True
     except Exception:
         _api_ok = False
     _api_ok_until = now + 30.0
+    if _api_ok:
+        api_models()   # the model names are read while we are here
     return _api_ok
 
 
@@ -1928,6 +2015,7 @@ class Handler(BaseHTTPRequestHandler):
                 "hermes_available": hermes_available(),
                 "hermes_error": _last_error,
                 "hermes_errors": list(_backend_errors[-6:]),
+                "hermes_api": api_status(),
                 "hermes_model": HERMES_CLI_MODEL,
                 "hermes_models": model_report(),
                 "hermes_settings": model_settings(),
