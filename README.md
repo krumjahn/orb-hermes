@@ -31,6 +31,7 @@ internet connection required once it is installed.
 - [How the wake word is caught](#how-the-wake-word-is-caught)
 - [Keeping it alive with the screen off](#keeping-it-alive-with-the-screen-off)
 - [When the server is slow](#when-the-server-is-slow)
+- [One question at a time, and the answer that belongs to it](#one-question-at-a-time-and-the-answer-that-belongs-to-it)
 - [Troubleshooting](#troubleshooting)
 - [Repository layout](#repository-layout)
 - [Licence](#licence)
@@ -376,6 +377,36 @@ adb logcat -s OrbHermes:* | grep -E "chunk dropped|recovered utterance"
 The agent itself can take a while — a cold 27B model needs about a minute to
 load, and a tool-using answer can run for a minute and a half. The phone waits
 420 s for an answer, and the bridge keeps its own model warm.
+
+## One question at a time, and the answer that belongs to it
+
+The Mac relay talks to the Beelink through a single channel, and only one
+request is on it at a time. That is what keeps the answers in order.
+
+It also means a request that is **given up on** leaves a hole: the reply to it
+still turns up later, and the next question — waiting for its own reply — takes
+that one instead. The orb was handed a stray "Pong" as a transcript of what
+somebody said, and the question it had actually asked was never answered.
+
+Two things went wrong, and they belong together:
+
+- The wait for a reply raised `queue.Empty` instead of reporting "no reply".
+  The branch that was supposed to clean up after a request that timed out never
+  ran.
+- Nothing threw the channel away when a request was given up on, so the late
+  reply was still sitting there for the next client.
+
+The relay now catches the empty wait, throws the channel away when it gives
+up (the dialer reconnects, and the next request starts on a clean channel),
+and waits for the dialer to come back instead of failing the request. The
+keep-warm — the little ping that keeps the model loaded — now stays quiet
+while the phone is talking, because it holds the channel for as long as the
+model takes to answer.
+
+`tools/test-relay.py` reproduces the whole thing with a stand-in bridge: the
+keep-warm's abandoned answer has to arrive while the next question is waiting,
+and the question has to get its own answer. The test fails against the old
+relay and passes against the new one.
 
 ## Troubleshooting
 

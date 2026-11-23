@@ -24,6 +24,7 @@ Usage:
 """
 import datetime
 import json
+import os
 import re
 import socket
 import socketserver
@@ -40,10 +41,10 @@ LOCAL_PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 8891
 # A cold agent on the Beelink can take minutes: the CLI may try a broken
 # mode first, then the quiet one, then fall back to Ollama. The relay must
 # wait longer than all of that, or it gives up before the answer arrives.
-RESPONSE_TIMEOUT = 420.0
+RESPONSE_TIMEOUT = float(os.environ.get("RELAY_RESPONSE_TIMEOUT", "420"))
 # The keep-warm only has to keep the model loaded, so it waits far less - and
 # it holds the channel while it does, so it must not block a real question.
-KEEP_WARM_TIMEOUT = 60.0
+KEEP_WARM_TIMEOUT = float(os.environ.get("RELAY_KEEP_WARM_TIMEOUT", "60"))
 MAX_REQUEST = 32 * 1024 * 1024
 
 # How many times a request is put back through when the Beelink answers with
@@ -60,9 +61,11 @@ RETRY_DELAY = 2.0
 # The first question after a quiet spell would then always come back as a
 # 502. A tiny request every few minutes keeps the model where it is, so the
 # first real question is answered straight away.
-KEEP_WARM_INTERVAL = 150.0
-KEEP_WARM_IDLE = 120.0
+KEEP_WARM_INTERVAL = float(os.environ.get("RELAY_KEEP_WARM_INTERVAL", "240"))
+KEEP_WARM_IDLE = float(os.environ.get("RELAY_KEEP_WARM_IDLE", "120"))
 KEEP_WARM_STARTUP = 20.0
+# How long a request waits for the dialer to come back before it is failed.
+DIALER_WAIT = float(os.environ.get("RELAY_DIALER_WAIT", "30"))
 
 
 def is_gateway_error(response: bytes) -> bool:
@@ -361,7 +364,8 @@ def inject_time_context(request: bytes, request_line: str) -> bytes:
 
 
 def log(*args):
-    print("[relay]", *args, flush=True)
+    stamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[relay {stamp}]", *args, flush=True)
 
 
 def request_preview(request: bytes, limit: int = 300) -> str:
@@ -476,11 +480,23 @@ class Channel:
             self.alive = False
 
     def send_request(self, payload):
-        with self.lock:
-            if self.sock is None:
+        """Send a request down the channel, waiting for a dialer if need be.
+
+        The dialer dialling in and out is normal - it reconnects whenever
+        the link drops, and the channel is thrown away whenever a request
+        is given up on. So a request that arrives in that gap waits for
+        the dialer to come back rather than being failed outright.
+        """
+        deadline = time.time() + DIALER_WAIT
+        while True:
+            with self.lock:
+                if self.sock is not None:
+                    send_frame(self.sock, payload)
+                    self.last_request_at = time.time()
+                    return
+            if time.time() >= deadline:
                 raise OSError("no dialer connected")
-            send_frame(self.sock, payload)
-            self.last_request_at = time.time()
+            time.sleep(0.2)
 
     def mark_model_used(self):
         """Note that the model was asked to work, so it stays loaded."""
@@ -505,7 +521,18 @@ class Channel:
             return time.time() - self.last_client_at
 
     def take_response(self, timeout):
-        return self.responses.get(timeout=timeout)
+        """Wait for the reply. None when it does not come in time.
+
+        The queue raises Empty when the time is up - it does not hand back
+        None - so the wait has to catch that itself. When it did not, the
+        reply that was still on its way was handed to the next client,
+        which took it for its own answer: the orb was handed "Pong" as a
+        transcript of what somebody said.
+        """
+        try:
+            return self.responses.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     def drain(self):
         """Throw away the replies that nobody is waiting for any more.
@@ -526,6 +553,39 @@ class Channel:
                 if dropped:
                     log(f"dropped {dropped} stale replie(s)")
                 return dropped
+
+    def reset(self):
+        """Throw the channel away.
+
+        A reply belongs to the request that was sent before it, and the
+        replies come back in the order the requests went out. So a client
+        that gives up leaves a hole: the reply to its request still turns
+        up later, and the next client - which is waiting for its own
+        reply - takes that one instead.
+
+        That is how the orb was handed "Pong" as a transcript of what
+        somebody said. So a request that is given up on takes the channel
+        down with it: the replies in it are dropped and the dialer
+        reconnects, and the next request starts on a clean channel where
+        the next reply really is its own.
+        """
+        with self.lock:
+            sock = self.sock
+            self.sock = None
+            self.alive = False
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        dropped = 0
+        while True:
+            try:
+                self.responses.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        log(f"the channel was reset - {dropped} stale replie(s) dropped")
 
 
 CHANNEL = Channel()
@@ -596,9 +656,16 @@ class LocalHandler(socketserver.BaseRequestHandler):
                     CHANNEL.drain()
                     CHANNEL.send_request(request)
                     response = CHANNEL.take_response(RESPONSE_TIMEOUT)
-                if response is None:
-                    log(f"client {peer}: no reply from the Beelink in time")
-                    return
+                    if response is None:
+                        log(f"client {peer}: no reply from the Beelink in time")
+                        # The reply to this request may still turn up. The
+                        # channel is thrown away so it cannot be handed to
+                        # the next client, who would take it for their own
+                        # answer. This is done here, inside the lock, so
+                        # that no other request can slip onto the channel
+                        # between giving up and cleaning up.
+                        CHANNEL.reset()
+                        return
                 if is_gateway_error(response) and attempt < RETRIES:
                     # The Beelink's dialer gives up on the bridge after its own
                     # read window and answers with a 502 of its own. That
@@ -664,14 +731,24 @@ def keep_warm_loop():
         # One attempt only. A keep-warm that keeps retrying just queues more
         # work behind whatever the Beelink is already doing.
         for attempt in range(1, 2):
-            # The phone comes first: if it is talking, leave the Beelink to it.
-            if CHANNEL.seconds_since_client_request() < 10:
+            # The phone comes first: if it is talking, leave the Beelink to
+            # it. The keep-warm holds the channel for as long as the agent
+            # takes to answer, and every second of that is a second the
+            # orb's own question has to wait.
+            if CHANNEL.seconds_since_client_request() < 45:
                 break
             try:
                 with CHANNEL.exchange:
                     CHANNEL.drain()
                     CHANNEL.send_request(request)
                     response = CHANNEL.take_response(KEEP_WARM_TIMEOUT)
+                    if response is None:
+                        # Its reply may still turn up, and the next client
+                        # would take it for their own. The channel goes down
+                        # with it, here inside the lock so that no other
+                        # request can slip onto it in between.
+                        log("keep-warm: no reply from the Beelink")
+                        CHANNEL.reset()
             except OSError as exc:
                 log(f"keep-warm: {exc}")
                 break
@@ -679,7 +756,6 @@ def keep_warm_loop():
                 log(f"keep-warm: {exc}")
                 break
             if response is None:
-                log("keep-warm: no reply from the Beelink")
                 break
             if not is_gateway_error(response):
                 log("keep-warm: the model is warm")
